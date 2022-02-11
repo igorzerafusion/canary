@@ -34,6 +34,7 @@
 #include "imbuements/imbuements.h"
 #include "items/containers/inbox/inbox.h"
 #include "io/ioguild.h"
+#include "io/ioprey.h"
 #include "creatures/appearance/mounts/mounts.h"
 #include "creatures/appearance/outfit/outfit.h"
 #include "grouping/party.h"
@@ -53,6 +54,8 @@ class SchedulerTask;
 class Bed;
 class Guild;
 class Imbuement;
+class PreySlot;
+class TaskHuntingSlot;
 
 struct OpenContainer {
 	Container* container;
@@ -173,69 +176,6 @@ class Player final : public Creature, public Cylinder
 			if (client) {
 				client->sendItemsPrice();
 			}
-		}
-
-		// New Prey
-		uint16_t getPreyState(uint16_t slot) const {
-			return preySlotState[slot];
-		}
-
-		uint16_t getPreyUnlocked(uint16_t slot) const {
-			return preySlotUnlocked[slot];
-		}
-
-		std::string getPreyCurrentMonster(uint16_t slot) const {
-			return preySlotCurrentMonster[slot];
-		}
-
-		std::string getPreyMonsterList(uint16_t slot) const {
-			return preySlotMonsterList[slot];
-		}
-
-		uint16_t getPreyFreeRerollIn(uint16_t slot) const {
-			return preySlotFreeRerollIn[slot];
-		}
-
-		uint16_t getPreyTimeLeft(uint16_t slot) const {
-			return preySlotTimeLeft[slot];
-		}
-
-		uint32_t getPreyNextUse(uint16_t slot) const {
-			return preySlotNextUse[slot];
-		}
-
-		uint16_t getPreyBonusType(uint16_t slot) const {
-			return preySlotBonusType[slot];
-		}
-
-		uint16_t getPreyBonusValue(uint16_t slot) const {
-			return preySlotBonusValue[slot];
-		}
-
-		uint16_t getPreyBonusGrade(uint16_t slot) const {
-			return preySlotBonusGrade[slot];
-		}
-
-		uint16_t getPreyBonusRerolls() const {
-			return preyBonusRerolls;
-		}
-
-		uint16_t getPreyTick(uint16_t slot) const {
-			return preySlotTick[slot];
-		}
-		//
-
-		uint16_t getPreyStamina(uint16_t index) const {
-			return preyStaminaMinutes[index];
-		}
-		uint16_t getPreyType(uint16_t index) const {
-			return preyBonusType[index];
-		}
-		uint16_t getPreyValue(uint16_t index) const {
-			return preyBonusValue[index];
-		}
-		std::string getPreyName(uint16_t index) const {
-			return preyBonusName[index];
 		}
 
 		bool addOfflineTrainingTries(skills_t skill, uint64_t tries);
@@ -1879,6 +1819,211 @@ class Player final : public Creature, public Cylinder
 		error_t SetAccountInterface(account::Account *account);
 		error_t GetAccountInterface(account::Account *account);
 
+		void sendMessageDialog(std::string message)
+		{
+			if (client) {
+				client->sendMessageDialog(message);
+			}
+		}
+
+		// Prey system
+		void initializePrey();
+
+		void sendPreyData() const {
+			if (client) {
+				for (PreySlot* slot : preys) {
+					client->sendPreyData(slot);
+				}
+
+				client->sendResourcesBalance(getMoney(), getBankBalance(), getPreyCards());
+			}
+		}
+
+		void sendPreyTimeLeft(PreySlot* slot) const {
+			if (g_config.getBoolean(PREY_ENABLED) && client) {
+				client->sendPreyTimeLeft(slot);
+			}
+		}
+
+		void reloadPreySlot(PreySlot_t slotid) {
+			if (g_config.getBoolean(PREY_ENABLED) && client) {
+				client->sendPreyData(getPreySlotById(slotid));
+				client->sendResourcesBalance(getMoney(), getBankBalance(), getPreyCards(), getTaskHuntingPoints());
+			}
+		}
+
+		PreySlot* getPreySlotById(PreySlot_t slotid) {
+			auto it = std::find_if(preys.begin(), preys.end(), [slotid](PreySlot* it) {
+				return it->id == slotid;
+				});
+
+			if (it != preys.end()) {
+				return *it;
+			}
+
+			return nullptr;
+		}
+
+		bool setPreySlotClass(PreySlot* slot) {
+			if (getPreySlotById(slot->id)) {
+				return false;
+			}
+
+			preys.push_back(slot);
+			return true;
+		}
+
+		bool usePreyCards(uint16_t amount) {
+			if (preyCards < amount) {
+				return false;
+			}
+
+			preyCards -= amount;
+			return true;
+		}
+
+		void addPreyCards(uint64_t amount) {
+			preyCards += amount;
+		}
+
+		uint64_t getPreyCards() const {
+			return preyCards;
+		}
+
+		uint32_t getPreyRerollPrice() const {
+			return getLevel() * g_config.getNumber(PREY_REROLL_PRICE_LEVEL);
+		}
+
+		std::vector<uint16_t> getPreyBlackList() {
+			std::vector<uint16_t> rt;
+			for (PreySlot* slot : preys) {
+				if (slot) {
+					if (slot->isOccupied()) {
+						rt.push_back(slot->selectedRaceId);
+					}
+					for (uint16_t raceId : slot->raceIdList) {
+						rt.push_back(raceId);
+					}
+				}
+			}
+
+			return rt;
+		}
+
+		PreySlot* getPreyWithMonster(uint16_t raceId) const {
+			if (!g_config.getBoolean(PREY_ENABLED)) {
+				return nullptr;
+			}
+
+			auto it = std::find_if(preys.begin(), preys.end(), [raceId](PreySlot* it) {
+				return it->selectedRaceId == raceId;
+				});
+
+			if (it != preys.end()) {
+				return *it;
+			}
+
+			return nullptr;
+		}
+
+		// Task hunting system
+		void initializeTaskHunting();
+		bool isCreatureUnlockedOnTaskHunting(MonsterType* mtype);
+
+		bool setTaskHuntingSlotClass(TaskHuntingSlot* slot) {
+			if (getTaskHuntingSlotById(slot->id)) {
+				return false;
+			}
+
+			taskHunting.push_back(slot);
+			return true;
+		}
+
+		void reloadTaskSlot(PreySlot_t slotid) {
+			if (g_config.getBoolean(TASK_HUNTING_ENABLED) && client) {
+				client->sendTaskHuntingData(getTaskHuntingSlotById(slotid));
+				client->sendResourcesBalance(getMoney(), getBankBalance(), getPreyCards(), getTaskHuntingPoints());
+			}
+		}
+
+		TaskHuntingSlot* getTaskHuntingSlotById(PreySlot_t slotid) {
+			auto it = std::find_if(taskHunting.begin(), taskHunting.end(), [slotid](TaskHuntingSlot* it) {
+				return it->id == slotid;
+				});
+
+			if (it != taskHunting.end()) {
+				return *it;
+			}
+
+			return nullptr;
+		}
+
+		std::vector<uint16_t> getTaskHuntingBlackList() {
+			std::vector<uint16_t> rt;
+			for (TaskHuntingSlot* slot : taskHunting) {
+				if (slot) {
+					if (slot->isOccupied()) {
+						rt.push_back(slot->selectedRaceId);
+					} else {
+						for (uint16_t raceId : slot->raceIdList) {
+							rt.push_back(raceId);
+						}
+					}
+				}
+			}
+
+			return rt;
+		}
+
+		void sendTaskHuntingData() {
+			if (client) {
+				client->sendResourcesBalance(getMoney(), getBankBalance(), getPreyCards(), getTaskHuntingPoints());
+				for (TaskHuntingSlot* slot : taskHunting) {
+					if (slot) {
+						client->sendTaskHuntingData(slot);
+					}
+				}
+			}
+		}
+
+		void addTaskHuntingPoints(uint16_t amount) {
+			taskHuntingPoints += amount;
+		}
+
+		void useTaskHuntingPoints(uint64_t amount) {
+			if (taskHuntingPoints > amount) {
+				taskHuntingPoints -= amount;
+			}
+		}
+
+		uint64_t getTaskHuntingPoints() {
+			return taskHuntingPoints;
+		}
+
+		uint32_t getTaskHuntingRerollPrice() const {
+			return getLevel() * g_config.getNumber(TASK_HUNTING_REROLL_PRICE_LEVEL);
+		}
+
+		uint32_t getTaskHuntingCancelPrice() const {
+			return getLevel() * g_config.getNumber(TASK_HUNTING_CANCEL_PRICE);
+		}
+
+		TaskHuntingSlot* getTaskHuntingWithCreature(uint16_t raceId) const {
+			if (!g_config.getBoolean(TASK_HUNTING_ENABLED)) {
+				return nullptr;
+			}
+
+			auto it = std::find_if(taskHunting.begin(), taskHunting.end(), [raceId](TaskHuntingSlot* itTask) {
+				return itTask->selectedRaceId == raceId;
+			});
+
+			if (it != taskHunting.end()) {
+				return *it;
+			}
+
+			return nullptr;
+		}
+
 
 	private:
 		std::forward_list<Condition*> getMuteConditions() const;
@@ -1968,6 +2113,9 @@ class Player final : public Creature, public Cylinder
 		std::vector<OutfitEntry> outfits;
 		std::vector<FamiliarEntry> familiars;
 
+		std::vector<PreySlot*> preys;
+		std::vector<TaskHuntingSlot*> taskHunting;
+
 		GuildWarVector guildWarVector;
 
 		std::forward_list<Party*> invitePartyList;
@@ -1994,6 +2142,8 @@ class Player final : public Creature, public Cylinder
 		uint64_t lastAttack = 0;
 		uint64_t bankBalance = 0;
 		uint64_t lastQuestlogUpdate = 0;
+		uint64_t preyCards = 0;
+		uint64_t taskHuntingPoints = 0;
 		int64_t lastFailedFollow = 0;
 		int64_t skullTicks = 0;
 		int64_t lastWalkthroughAttempt = 0;
@@ -2065,10 +2215,6 @@ class Player final : public Creature, public Cylinder
 
 		uint16_t lastStatsTrainingTime = 0;
 		uint16_t staminaMinutes = 2520;
-		std::vector<uint16_t> preyStaminaMinutes = {7200, 7200, 7200};
-		std::vector<uint16_t> preyBonusType = {0, 0, 0};
-		std::vector<uint16_t> preyBonusValue = {0, 0, 0};
-		std::vector<std::string> preyBonusName = {"", "", ""};
 		std::vector<uint8_t> blessings = { 0, 0, 0, 0, 0, 0, 0, 0 };
 		uint16_t maxWriteLen = 0;
 		uint16_t baseXpGain = 100;
@@ -2104,20 +2250,6 @@ class Player final : public Creature, public Cylinder
 		int32_t UsedRunesBit = 0;
 		int32_t UnlockedRunesBit = 0;
 		std::pair<ConditionType_t, uint64_t> cleanseCondition = {CONDITION_NONE, 0};
-
-		// New Prey
-		uint16_t preyBonusRerolls = 0;
-		std::vector<uint16_t> preySlotState = {0, 0, 0};
-		std::vector<uint16_t> preySlotUnlocked = {0, 0, 0};
-		std::vector<std::string> preySlotCurrentMonster = { "", "", "" };
-		std::vector<std::string> preySlotMonsterList = { "", "", "" };
-		std::vector<uint16_t> preySlotFreeRerollIn = { 0, 0, 0 };
-		std::vector<uint16_t> preySlotTimeLeft = {7200, 7200, 7200};
-		std::vector<uint32_t> preySlotNextUse = { 0, 0, 0 };
-		std::vector<uint16_t> preySlotBonusType = {0, 0, 0};
-		std::vector<uint16_t> preySlotBonusValue = {0, 0, 0};
-		std::vector<uint16_t> preySlotBonusGrade = { 0, 0, 0 };
-		std::vector<uint16_t> preySlotTick = { 0, 0, 0 };
 
 		uint8_t soul = 0;
 		uint8_t levelPercent = 0;
